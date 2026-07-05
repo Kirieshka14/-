@@ -26,6 +26,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
           PIXAZO_API_KEY: ${{ secrets.PIXAZO_API_KEY }}
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
         run: python main.py
 
       # сохраняем seen_links.json обратно в репозиторий, чтобы не дублировать посты
