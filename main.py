@@ -124,20 +124,25 @@ def is_important_news(title: str, summary: str) -> bool:
     except Exception as e:
         print(f"Ошибка оценки важности: {e}")
         return False
+    finally:
+        time.sleep(5)  # бесплатный тир OpenRouter: лимит 16 запросов/мин
 
 
 def rewrite_news(title: str, summary: str) -> str:
-    completion = client.chat.completions.create(
-        model="google/gemma-4-31b-it:free",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"Заголовок: {title}\n\nТекст: {summary}\n\nНапиши пост для канала."},
-        ],
-        max_tokens=600,
-    )
-    raw_text = completion.choices[0].message.content.strip()
-    post = normalize_markdown(raw_text)
-    return f"{post}\n\n#Новости{FOOTER}"
+    try:
+        completion = client.chat.completions.create(
+            model="google/gemma-4-31b-it:free",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": f"Заголовок: {title}\n\nТекст: {summary}\n\nНапиши пост для канала."},
+            ],
+            max_tokens=600,
+        )
+        raw_text = completion.choices[0].message.content.strip()
+        post = normalize_markdown(raw_text)
+        return f"{post}\n\n#Новости{FOOTER}"
+    finally:
+        time.sleep(5)
 
 
 def generate_image(title: str):
@@ -240,17 +245,20 @@ def fetch_market_data():
 
 def analyze_market(market_data: dict) -> str:
     data_str = json.dumps(market_data, ensure_ascii=False)
-    completion = client.chat.completions.create(
-        model="meta-llama/llama-3.3-70b-instruct:free",
-        messages=[
-            {"role": "system", "content": MARKET_ANALYSIS_PROMPT},
-            {"role": "user", "content": f"Реальные данные с рынка:\n{data_str}"},
-        ],
-        max_tokens=400,
-    )
-    raw_text = completion.choices[0].message.content.strip()
-    post = normalize_markdown(raw_text)
-    return f"{post}\n\n_{MARKET_DISCLAIMER}_\n\n#Рынок{FOOTER}"
+    try:
+        completion = client.chat.completions.create(
+            model="meta-llama/llama-3.3-70b-instruct:free",
+            messages=[
+                {"role": "system", "content": MARKET_ANALYSIS_PROMPT},
+                {"role": "user", "content": f"Реальные данные с рынка:\n{data_str}"},
+            ],
+            max_tokens=400,
+        )
+        raw_text = completion.choices[0].message.content.strip()
+        post = normalize_markdown(raw_text)
+        return f"{post}\n\n_{MARKET_DISCLAIMER}_\n\n#Рынок{FOOTER}"
+    finally:
+        time.sleep(5)
 
 
 # =========================================================
