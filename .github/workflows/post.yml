@@ -22,7 +22,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install openai feedparser requests
+        run: pip install openai feedparser requests matplotlib
 
       - name: Run bot
         env:
