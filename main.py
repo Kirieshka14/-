@@ -1,14 +1,17 @@
 """
 Пайплайн:
 1. RSS -> рерайт через Gemma 4 (OpenRouter) -> 2 новостных поста в Telegram (#Новости)
-2. CoinGecko (реальные цены) -> анализ через Llama 3.3 70B -> 1 пост про рынок (#Рынок)
-Важные новости иллюстрируются реальным фото с Unsplash (не AI-генерация).
+2. CoinGecko (реальные цены) -> анализ через Gemma -> 1 пост про рынок с графиком (#Рынок)
+Важные новости иллюстрируются реальным фото с Unsplash. Заголовки постов используют
+премиум-эмодзи (доступны, т.к. владелец бота имеет Telegram Premium).
 """
 
 import os
 import json
 import re
 import time
+import html
+import hashlib
 import feedparser
 import requests
 from openai import OpenAI
@@ -25,11 +28,33 @@ RSS_FEEDS = [
     "https://cointelegraph.com/rss",
     "https://www.coindesk.com/arc/outboundfeeds/rss/",
     "http://feeds.bbci.co.uk/news/world/rss.xml",
-    "https://www.cnbc.com/id/100727362/device/rss/rss.html",  # CNBC World News
+    "https://www.cnbc.com/id/100727362/device/rss/rss.html",
 ]
 
 FOOTER = "\n\n[Матвей | Крипта](https://t.me/KbusinessK)"
 MARKET_DISCLAIMER = "Рынок никому ничего не должен. Любой прогноз — это лишь вероятность, а не гарантия."
+
+# Премиум-эмодзи (владелец бота — Telegram Premium, поэтому доступно всем ботам аккаунта)
+# формат: (базовый unicode-символ, custom_emoji_id)
+PREMIUM_EMOJIS = [
+    ("💸", "5231005931550030290"),
+    ("💸", "5233326571099534068"),
+    ("💸", "5231449120635370684"),
+    ("💎", "5296742257146241213"),
+    ("👛", "5424976816530014958"),
+    ("💎", "5404558404565875143"),
+    ("🍷", "6044096859054545852"),
+    ("😎", "6044217848283274473"),
+]
+
+EMOJI_PATTERN = re.compile(
+    "["
+    "\U0001F300-\U0001FAFF"
+    "\U00002600-\U000027BF"
+    "\U0001F1E6-\U0001F1FF"
+    "]",
+    flags=re.UNICODE,
+)
 
 SYSTEM_PROMPT = """Ты пишешь посты от лица Матвея — автора Telegram-канала про бизнес,
 криптовалюты, инвестиции и финансовую грамотность.
@@ -128,19 +153,35 @@ def normalize_markdown(text: str) -> str:
 
 
 def strip_signature(text: str) -> str:
-    """Вырезает случайно добавленную моделью подпись/ссылку на канал —
-    футер добавляется отдельно программно, дублей быть не должно."""
-    # markdown-ссылка вида [Матвей | Крипта](https://t.me/KbusinessK) в любом виде
+    """Вырезает случайно добавленную моделью подпись/ссылку на канал."""
     text = re.sub(r"\[?\s*Матвей\s*\|\s*Крипта\s*\]?\s*\(?\s*https?://t\.me/KbusinessK\)?", "", text, flags=re.IGNORECASE)
-    # голая ссылка на канал без подписи
     text = re.sub(r"https?://t\.me/KbusinessK", "", text, flags=re.IGNORECASE)
-    # просто текст подписи без ссылки
     text = re.sub(r"Матвей\s*\|\s*Крипта", "", text, flags=re.IGNORECASE)
     return text.strip()
 
 
+def apply_premium_emoji(html_text: str, seed: str) -> str:
+    """Заменяет первый эмодзи в тексте (заголовочный) на премиум-версию."""
+    match = EMOJI_PATTERN.search(html_text[:80])
+    if not match:
+        return html_text
+    idx = int(hashlib.md5(seed.encode()).hexdigest(), 16) % len(PREMIUM_EMOJIS)
+    base_char, emoji_id = PREMIUM_EMOJIS[idx]
+    replacement = f'<tg-emoji emoji-id="{emoji_id}">{base_char}</tg-emoji>'
+    return html_text[: match.start()] + replacement + html_text[match.end() :]
+
+
+def convert_to_telegram_html(text: str, seed: str) -> str:
+    """Markdown (*bold*, _italic_, [text](url)) -> Telegram HTML + премиум-эмодзи в заголовке."""
+    escaped = html.escape(text, quote=False)
+    escaped = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', escaped)
+    escaped = re.sub(r"\*(.+?)\*", r"<b>\1</b>", escaped)
+    escaped = re.sub(r"_(.+?)_", r"<i>\1</i>", escaped)
+    escaped = apply_premium_emoji(escaped, seed)
+    return escaped
+
+
 def call_openrouter_with_retry(model: str, messages: list, max_tokens: int, retries: int = 3, wait_seconds: int = 40):
-    """Вызов OpenRouter с повтором при rate limit (429)."""
     last_error = None
     for attempt in range(retries + 1):
         try:
@@ -157,7 +198,8 @@ def call_openrouter_with_retry(model: str, messages: list, max_tokens: int, retr
 
 
 def rewrite_and_classify(title: str, summary: str):
-    """Один запрос вместо двух: модель сразу пишет пост И оценивает важность новости."""
+    """Один запрос: модель сразу пишет пост И оценивает важность новости."""
+    raw_text = ""
     try:
         raw_text = call_openrouter_with_retry(
             model="google/gemma-4-31b-it:free",
@@ -167,7 +209,6 @@ def rewrite_and_classify(title: str, summary: str):
             ],
             max_tokens=700,
         )
-        # на случай, если модель всё же обернёт в ```json ... ```
         cleaned = raw_text.strip()
         if cleaned.startswith("```"):
             cleaned = cleaned.split("```")[1]
@@ -183,7 +224,6 @@ def rewrite_and_classify(title: str, summary: str):
         return full_post, important
     except json.JSONDecodeError as e:
         print(f"Не смог распарсить JSON от модели: {e}. Сырой ответ: {raw_text[:300]}")
-        # фолбэк: используем сырой текст как пост, важность считаем False
         cleaned_fallback = strip_signature(normalize_markdown(raw_text))
         return f"{cleaned_fallback}\n\n#Новости{FOOTER}", False
     finally:
@@ -191,7 +231,6 @@ def rewrite_and_classify(title: str, summary: str):
 
 
 def search_unsplash_image(query: str):
-    """Ищет реальное фото по теме на Unsplash. Возвращает URL картинки или None."""
     try:
         resp = requests.get(
             "https://api.unsplash.com/search/photos",
@@ -211,8 +250,6 @@ def search_unsplash_image(query: str):
 
 
 def generate_image(title: str):
-    """Подбирает реальное фото по теме новости через Unsplash."""
-    # Берём короткий поисковый запрос — просто заголовок, Unsplash сам разберётся
     query = title[:100]
     return search_unsplash_image(query)
 
@@ -245,18 +282,7 @@ def analyze_market(market_data: dict) -> str:
         time.sleep(5)
 
 
-def send_to_telegram(text: str):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    resp = requests.post(url, json={"chat_id": TELEGRAM_CHANNEL_ID, "text": text, "parse_mode": "Markdown"})
-    if not resp.ok:
-        print(f"Markdown parse failed ({resp.text}), retrying as plain text")
-        resp = requests.post(url, json={"chat_id": TELEGRAM_CHANNEL_ID, "text": text})
-    resp.raise_for_status()
-
-
 def generate_market_chart(market_data: dict, avg_change: float) -> str:
-    """Рисует картинку: зелёные/красные бары (реальные % изменения по монетам) + стрелка
-    общего направления. Возвращает путь к сохранённому PNG."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -271,7 +297,7 @@ def generate_market_chart(market_data: dict, avg_change: float) -> str:
     ax.set_facecolor(bg_color)
 
     colors = ["#1fa855" if c >= 0 else "#e0393e" for c in changes]
-    heights = [max(abs(c), 0.5) for c in changes]  # чисто визуальная высота, не абсолютная цена
+    heights = [max(abs(c), 0.5) for c in changes]
     x = range(len(changes))
     ax.bar(x, heights, color=colors, width=0.5, zorder=3)
 
@@ -298,30 +324,42 @@ def generate_market_chart(market_data: dict, avg_change: float) -> str:
     return path
 
 
-def send_photo_file_to_telegram(file_path: str, caption: str):
-    """Отправляет локальный файл (не URL) как фото в Telegram."""
+def send_to_telegram(html_text: str):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    resp = requests.post(url, json={"chat_id": TELEGRAM_CHANNEL_ID, "text": html_text, "parse_mode": "HTML"})
+    if not resp.ok:
+        print(f"HTML parse failed ({resp.text}), retrying as plain text without tags")
+        plain = re.sub(r"<[^>]+>", "", html_text)
+        resp = requests.post(url, json={"chat_id": TELEGRAM_CHANNEL_ID, "text": plain})
+    resp.raise_for_status()
+
+
+def send_photo_to_telegram(image_url: str, caption_html: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-    short_caption = caption if len(caption) <= 1024 else caption[:1021] + "..."
+    short_caption = caption_html if len(caption_html) <= 1024 else caption_html[:1021] + "..."
+    resp = requests.post(url, json={
+        "chat_id": TELEGRAM_CHANNEL_ID, "photo": image_url,
+        "caption": short_caption, "parse_mode": "HTML",
+    })
+    if not resp.ok:
+        print(f"Ошибка отправки фото ({resp.text}), фолбэк на обычный текст")
+        send_to_telegram(caption_html)
+        return
+    resp.raise_for_status()
+
+
+def send_photo_file_to_telegram(file_path: str, caption_html: str):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    short_caption = caption_html if len(caption_html) <= 1024 else caption_html[:1021] + "..."
     with open(file_path, "rb") as f:
         resp = requests.post(
             url,
-            data={"chat_id": TELEGRAM_CHANNEL_ID, "caption": short_caption, "parse_mode": "Markdown"},
+            data={"chat_id": TELEGRAM_CHANNEL_ID, "caption": short_caption, "parse_mode": "HTML"},
             files={"photo": f},
         )
     if not resp.ok:
         print(f"Ошибка отправки графика ({resp.text}), фолбэк на обычный текст")
-        send_to_telegram(caption)
-        return
-    resp.raise_for_status()
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-    short_caption = caption if len(caption) <= 1024 else caption[:1021] + "..."
-    resp = requests.post(url, json={
-        "chat_id": TELEGRAM_CHANNEL_ID, "photo": image_url,
-        "caption": short_caption, "parse_mode": "Markdown",
-    })
-    if not resp.ok:
-        print(f"Ошибка отправки фото ({resp.text}), фолбэк на обычный текст")
-        send_to_telegram(caption)
+        send_to_telegram(caption_html)
         return
     resp.raise_for_status()
 
@@ -346,15 +384,16 @@ def post_news(seen: set):
                 print(f"Ошибка рерайта на '{title}': {e}")
                 continue
 
+            html_post = convert_to_telegram_html(post_text, seed=title)
             image_url = generate_image(title) if important else None
 
             try:
                 if image_url:
-                    send_photo_to_telegram(image_url, post_text)
+                    send_photo_to_telegram(image_url, html_post)
                     images += 1
                     print(f"Опубликовано с картинкой: {title}")
                 else:
-                    send_to_telegram(post_text)
+                    send_to_telegram(html_post)
                     print(f"Опубликовано: {title}")
                 posted += 1
             except Exception as e:
@@ -366,12 +405,13 @@ def post_market_analysis():
     try:
         market_data = fetch_market_data()
         analysis = analyze_market(market_data)
+        html_analysis = convert_to_telegram_html(analysis, seed="market-" + analysis[:20])
 
         changes = [v.get("usd_24h_change", 0) for v in market_data.values() if isinstance(v, dict)]
         avg_change = sum(changes) / len(changes) if changes else 0
 
         chart_path = generate_market_chart(market_data, avg_change)
-        send_photo_file_to_telegram(chart_path, analysis)
+        send_photo_file_to_telegram(chart_path, html_analysis)
 
         print("Опубликован анализ рынка")
         return True
