@@ -249,7 +249,65 @@ def send_to_telegram(text: str):
     resp.raise_for_status()
 
 
-def send_photo_to_telegram(image_url: str, caption: str):
+def generate_market_chart(market_data: dict, avg_change: float) -> str:
+    """Рисует картинку: зелёные/красные бары (реальные % изменения по монетам) + стрелка
+    общего направления. Возвращает путь к сохранённому PNG."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    coin_ids = ["bitcoin", "ethereum", "solana"]
+    labels = ["BTC", "ETH", "SOL"]
+    changes = [market_data.get(c, {}).get("usd_24h_change", 0) for c in coin_ids]
+
+    bg_color = "#0d0f14"
+    fig, ax = plt.subplots(figsize=(6, 6))
+    fig.patch.set_facecolor(bg_color)
+    ax.set_facecolor(bg_color)
+
+    colors = ["#1fa855" if c >= 0 else "#e0393e" for c in changes]
+    heights = [max(abs(c), 0.5) for c in changes]  # чисто визуальная высота, не абсолютная цена
+    x = range(len(changes))
+    ax.bar(x, heights, color=colors, width=0.5, zorder=3)
+
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(labels, color="white", fontsize=16, fontweight="bold")
+    ax.get_yaxis().set_visible(False)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    ax.set_ylim(0, max(heights) * 1.8)
+
+    arrow_color = "#1fa855" if avg_change >= 0 else "#e0393e"
+    top = max(heights) * 1.7
+    if avg_change >= 0:
+        ax.annotate("", xy=(len(changes) - 0.2, top), xytext=(len(changes) - 1.3, top * 0.45),
+                    arrowprops=dict(arrowstyle="-|>", color=arrow_color, lw=8, mutation_scale=35), zorder=4)
+    else:
+        ax.annotate("", xy=(len(changes) - 0.2, top * 0.15), xytext=(len(changes) - 1.3, top * 0.85),
+                    arrowprops=dict(arrowstyle="-|>", color=arrow_color, lw=8, mutation_scale=35), zorder=4)
+
+    plt.tight_layout()
+    path = "market_chart.png"
+    plt.savefig(path, facecolor=fig.get_facecolor(), dpi=150)
+    plt.close(fig)
+    return path
+
+
+def send_photo_file_to_telegram(file_path: str, caption: str):
+    """Отправляет локальный файл (не URL) как фото в Telegram."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    short_caption = caption if len(caption) <= 1024 else caption[:1021] + "..."
+    with open(file_path, "rb") as f:
+        resp = requests.post(
+            url,
+            data={"chat_id": TELEGRAM_CHANNEL_ID, "caption": short_caption, "parse_mode": "Markdown"},
+            files={"photo": f},
+        )
+    if not resp.ok:
+        print(f"Ошибка отправки графика ({resp.text}), фолбэк на обычный текст")
+        send_to_telegram(caption)
+        return
+    resp.raise_for_status()
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
     short_caption = caption if len(caption) <= 1024 else caption[:1021] + "..."
     resp = requests.post(url, json={
@@ -304,21 +362,11 @@ def post_market_analysis():
         market_data = fetch_market_data()
         analysis = analyze_market(market_data)
 
-        # определяем общее направление по средним изменениям, чтобы подобрать релевантную картинку
         changes = [v.get("usd_24h_change", 0) for v in market_data.values() if isinstance(v, dict)]
         avg_change = sum(changes) / len(changes) if changes else 0
-        if avg_change > 1:
-            query = "stock market chart uptrend green bullish"
-        elif avg_change < -1:
-            query = "stock market chart downtrend red bearish"
-        else:
-            query = "stock market trading chart finance"
 
-        image_url = search_unsplash_image(query)
-        if image_url:
-            send_photo_to_telegram(image_url, analysis)
-        else:
-            send_to_telegram(analysis)  # фолбэк, если Unsplash не нашёл фото
+        chart_path = generate_market_chart(market_data, avg_change)
+        send_photo_file_to_telegram(chart_path, analysis)
 
         print("Опубликован анализ рынка")
         return True
