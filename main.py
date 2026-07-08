@@ -7,6 +7,7 @@
 
 import os
 import json
+import re
 import time
 import feedparser
 import requests
@@ -121,6 +122,18 @@ def normalize_markdown(text: str) -> str:
     return text
 
 
+def strip_signature(text: str) -> str:
+    """Вырезает случайно добавленную моделью подпись/ссылку на канал —
+    футер добавляется отдельно программно, дублей быть не должно."""
+    # markdown-ссылка вида [Матвей | Крипта](https://t.me/KbusinessK) в любом виде
+    text = re.sub(r"\[?\s*Матвей\s*\|\s*Крипта\s*\]?\s*\(?\s*https?://t\.me/KbusinessK\)?", "", text, flags=re.IGNORECASE)
+    # голая ссылка на канал без подписи
+    text = re.sub(r"https?://t\.me/KbusinessK", "", text, flags=re.IGNORECASE)
+    # просто текст подписи без ссылки
+    text = re.sub(r"Матвей\s*\|\s*Крипта", "", text, flags=re.IGNORECASE)
+    return text.strip()
+
+
 def call_openrouter_with_retry(model: str, messages: list, max_tokens: int, retries: int = 3, wait_seconds: int = 40):
     """Вызов OpenRouter с повтором при rate limit (429)."""
     last_error = None
@@ -159,13 +172,15 @@ def rewrite_and_classify(title: str, summary: str):
 
         data = json.loads(cleaned)
         post = normalize_markdown(data.get("post", "").strip())
+        post = strip_signature(post)
         important = "ВАЖНО" in data.get("importance", "").upper()
         full_post = f"{post}\n\n#Новости{FOOTER}"
         return full_post, important
     except json.JSONDecodeError as e:
         print(f"Не смог распарсить JSON от модели: {e}. Сырой ответ: {raw_text[:300]}")
         # фолбэк: используем сырой текст как пост, важность считаем False
-        return f"{normalize_markdown(raw_text)}\n\n#Новости{FOOTER}", False
+        cleaned_fallback = strip_signature(normalize_markdown(raw_text))
+        return f"{cleaned_fallback}\n\n#Новости{FOOTER}", False
     finally:
         time.sleep(5)
 
@@ -211,7 +226,7 @@ def analyze_market(market_data: dict) -> str:
     data_str = json.dumps(market_data, ensure_ascii=False)
     try:
         raw_text = call_openrouter_with_retry(
-            model="meta-llama/llama-3.3-70b-instruct:free",
+            model="google/gemma-4-31b-it:free",
             messages=[
                 {"role": "system", "content": MARKET_ANALYSIS_PROMPT},
                 {"role": "user", "content": f"Реальные данные с рынка:\n{data_str}"},
@@ -219,6 +234,7 @@ def analyze_market(market_data: dict) -> str:
             max_tokens=400,
         )
         post = normalize_markdown(raw_text)
+        post = strip_signature(post)
         return f"{post}\n\n_{MARKET_DISCLAIMER}_\n\n#Рынок{FOOTER}"
     finally:
         time.sleep(5)
