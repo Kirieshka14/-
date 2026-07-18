@@ -1,38 +1,33 @@
 name: Post news to Telegram
-
 on:
   schedule:
     - cron: "*/30 * * * *"   # каждые 30 минут
   workflow_dispatch:          # + кнопка "Run workflow" вручную в интерфейсе GitHub
-
 concurrency:
   group: post-news-telegram
   cancel-in-progress: false  # не отменяем текущий запуск, просто не даём двум идти параллельно
-
 jobs:
   post:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Install dependencies
-        run: pip install openai feedparser requests matplotlib
-
+        run: pip install openai feedparser requests matplotlib telethon
       - name: Run bot
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          TELETHON_SESSION: ${{ secrets.TELETHON_SESSION }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
           UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
           COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
         run: python main.py
-
       # сохраняем seen_links.json обратно в репозиторий, чтобы не дублировать посты
       - name: Commit seen_links.json
         run: |
